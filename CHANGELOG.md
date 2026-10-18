@@ -9,6 +9,17 @@ samsara uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `/readyz` (and `/healthz`) now return 503 while a Critical or Significant
+  component has not yet called `ready()`. Before, a component with no health
+  data counted as healthy, so the endpoint reported ready while, for example,
+  the database was still connecting. Probes that relied on a 200 during startup
+  now see 503 until startup completes, as the README already documented.
+
+### Removed
+- `explanation.md`. Its package-specific invariants now live in `AGENTS.md`
+  and the code comments.
+
 ---
 
 ## [0.7.0] — 2026-08-26

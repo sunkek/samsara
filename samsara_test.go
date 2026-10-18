@@ -2,6 +2,7 @@ package samsara_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -697,6 +698,136 @@ func (m *delayedReadyComponent) Start(ctx context.Context, ready func()) error {
 	case <-ctx.Done():
 	}
 	return nil
+}
+
+type gatedComponent struct {
+	mockComponent
+	gate chan struct{} // test closes this to let Start call ready()
+}
+
+func (g *gatedComponent) Start(ctx context.Context, ready func()) error {
+	select {
+	case <-g.gate:
+		ready()
+	case <-ctx.Done():
+		return nil // clean shutdown while still gated (the Component contract: nil, not ctx.Err())
+	}
+	select {
+	case <-g.stop:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+func newGated(name string) *gatedComponent {
+	return &gatedComponent{
+		mockComponent: *newMock(name),
+		gate:          make(chan struct{}),
+	}
+}
+
+// readyzBody mirrors the JSON that /readyz returns.
+type readyzBody struct {
+	Status     string `json:"status"`
+	Components []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	} `json:"components"`
+}
+
+// getReadyz fetches /readyz and returns the status code and each component's
+// status by name. A non-nil error means no usable response arrived.
+func getReadyz(client *http.Client, url string) (int, map[string]string, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	var body readyzBody
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return resp.StatusCode, nil, err
+	}
+	statuses := make(map[string]string, len(body.Components))
+	for _, c := range body.Components {
+		statuses[c.Name] = c.Status
+	}
+	return resp.StatusCode, statuses, nil
+}
+
+func TestReady_CriticalStarting(t *testing.T) {
+	// /readyz must answer 503 while a Critical component has not called
+	// ready(), and 200 once it has. The gate holds the component inside that
+	// window for as long as the test needs, so nothing depends on timing.
+	sup := samsara.NewSupervisor(samsara.WithStartTimeout(10 * time.Second))
+
+	// The health server goes first: the supervisor starts it, then blocks on
+	// stuck's ready(), so /readyz is served throughout stuck's startup.
+	hs := samsara.NewHealthServer(sup, samsara.WithHealthAddr(":19091"))
+	sup.Add(hs, samsara.WithTier(samsara.TierCritical))
+	s := newGated("stuck")
+	sup.Add(s, samsara.WithTier(samsara.TierCritical))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	defer client.CloseIdleConnections()
+	const url = "http://localhost:19091/readyz"
+
+	// Phase 1: gate closed. Retry only while the server isn't listening or
+	// hasn't reported itself healthy yet; until then a 503 could be the health
+	// server's own unknown state rather than stuck's. A 200 at any point is
+	// the bug under test, so it fails at once instead of being retried.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		code, statuses, err := getReadyz(client, url)
+		if code == http.StatusOK {
+			t.Fatalf("readyz: got 200 while stuck has not called ready(); components: %v", statuses)
+		}
+		if err == nil && statuses["health-server"] == "ok" {
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("readyz: expected 503 while stuck is starting, got %d", code)
+			}
+			if statuses["stuck"] != "degraded" {
+				t.Fatalf("readyz: expected stuck degraded, got %q", statuses["stuck"])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("health server never reported itself ok: code=%d statuses=%v err=%v", code, statuses, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Phase 2: let stuck call ready(). Its status becomes known when the
+	// supervisor's manage loop picks it up, so poll briefly for the 200.
+	close(s.gate)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		code, statuses, err := getReadyz(client, url)
+		if err == nil && code == http.StatusOK {
+			if statuses["stuck"] != "ok" {
+				t.Fatalf("readyz: 200 but stuck is %q", statuses["stuck"])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("readyz never reached 200 after ready(): code=%d statuses=%v err=%v", code, statuses, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("supervisor did not stop in time")
+	}
 }
 
 func TestReady_PreciseReadiness(t *testing.T) {

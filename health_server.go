@@ -235,6 +235,10 @@ func (h *HealthServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 			if status.Tier != TierAuxiliary {
 				allHealthy = false
 			}
+		} else if !status.Known && status.Tier != TierAuxiliary {
+			detail.Status = statusDegraded
+			detail.Error = "not ready"
+			allHealthy = false
 		}
 		details = append(details, detail)
 	}
