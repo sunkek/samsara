@@ -252,7 +252,7 @@ subject to its restart policy and tier, not silently lost.
 | `GET /readyz` | All Critical + Significant components healthy | Kubernetes `readinessProbe` |
 | `GET /healthz` | Same as `/readyz` | Docker `HEALTHCHECK` |
 
-**`/readyz` flips during startup** — it returns 503 until every Critical and Significant component has called `ready()` and passed its first health check.
+**`/readyz` flips during startup** — it returns 503 until every Critical and Significant component has called `ready()`. It does not wait for a first health probe: `ready()` is the component's own statement that it can serve, so call it only once that is true (port bound, pool pinged).
 
 **`/readyz` flips during shutdown** — the HealthServer stops last, so it returns 503 as soon as shutdown begins, before any other component stops. This drains load balancer connections cleanly.
 
@@ -417,7 +417,7 @@ for _, status := range sup.HealthReport() {
 | Field | Type | Description |
 |---|---|---|
 | `Err` | `error` | `nil` = healthy; non-nil = last health check error |
-| `Known` | `bool` | `false` until first health check completes |
+| `Known` | `bool` | `false` until the component has called `ready()`; `/readyz` counts an unknown Critical or Significant component as not ready |
 | `Tier` | `Tier` | `TierCritical`, `TierSignificant`, or `TierAuxiliary` |
 | `RestartCount` | `int` | How many times the supervisor has restarted this component |
 
@@ -569,9 +569,6 @@ Passed to `sup.Add(component, opts...)`:
 
 ## Further reading
 
-- [explanation.md](./explanation.md) — a long-form walkthrough of how the package
-  works internally, doubling as an introduction to Go concurrency. A learning guide;
-  this README and the doc comments are the reference.
 - [CONTEXT.md](./CONTEXT.md) — the domain glossary: component, fault, tier, readiness.
 - [docs/adr/](./docs/adr/) — the decisions behind the design.
 

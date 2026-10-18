@@ -121,8 +121,9 @@ to replace the process, not to wait.
 _Avoid_: alive check, /livez as a concept name
 
 **Readiness**:
-Whether the Application should currently receive traffic. Turns false while a
-critical or significant Component is unhealthy, and true again on recovery.
+Whether the Application should currently receive traffic. False until every
+critical and significant Component is ready, false again while any of them is
+unhealthy, and true again on recovery.
 _Avoid_: availability, serving
 
 **Health report**:

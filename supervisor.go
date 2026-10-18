@@ -292,7 +292,7 @@ type NamedComponentStatus struct {
 // ComponentStatus is a point-in-time snapshot of a single component's health.
 type ComponentStatus struct {
 	Err          error // nil means healthy; non-nil means last health check failed
-	Known        bool  // false until the first health check completes
+	Known        bool  // false until the component has called ready(); /readyz treats unknown as not ready
 	Tier         Tier
 	RestartCount int // number of times the component has been restarted by the supervisor
 }
@@ -330,6 +330,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 // reverse order. This is the default behaviour.
 func (s *Supervisor) runSequential(ctx context.Context, cancel context.CancelCauseFunc, ordered []*managedComponent) error {
 	started := make([]*managedComponent, 0, len(ordered))
+	// One slot per component: each manage sends at most one error, so no sender
+	// blocks even before Run drains. Closed only after wg.Wait, once every
+	// sender has exited; a send on a closed channel would panic.
 	criticalErrCh := make(chan error, len(ordered))
 	var wg sync.WaitGroup
 
@@ -532,6 +535,8 @@ func (s *Supervisor) launch(
 	criticalErrCh chan<- error,
 	wg *sync.WaitGroup,
 ) (<-chan error, <-chan struct{}) {
+	// readyCh is buffered so the goroutine can report its start result and move
+	// on even if the caller already left its select via ctx.Done().
 	readyCh := make(chan error, 1)
 	startErrCh := make(chan struct{})
 
@@ -547,6 +552,8 @@ func (s *Supervisor) launch(
 		}
 		readyCh <- nil
 
+		// The send makes the error Run's return value; cancel(err) shuts the
+		// other components down and records the cause. Neither does the other's job.
 		if err := s.manage(ctx, mc, cancel, startExit); err != nil {
 			criticalErrCh <- err
 			cancel(err)
